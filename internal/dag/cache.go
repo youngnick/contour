@@ -17,12 +17,9 @@ import (
 	"bytes"
 	"encoding/json"
 
-	"github.com/projectcontour/contour/internal/k8s"
-
 	v1 "k8s.io/api/core/v1"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	"k8s.io/api/networking/v1beta1"
-	"k8s.io/client-go/tools/cache"
 
 	ingressroutev1 "github.com/projectcontour/contour/apis/contour/v1beta1"
 	projectcontour "github.com/projectcontour/contour/apis/projectcontour/v1"
@@ -67,190 +64,10 @@ func toMeta(obj Object) Meta {
 	}
 }
 
-// Insert inserts obj into the KubernetesCache.
-// Insert returns true if the cache accepted the object, or false if the value
-// is not interesting to the cache. If an object with a matching type, name,
-// and namespace exists, it will be overwritten.
-func (kc *KubernetesCache) Insert(obj interface{}) bool {
-	if obj, ok := obj.(Object); ok {
-		kind := k8s.KindOf(obj)
-		for key := range obj.GetObjectMeta().GetAnnotations() {
-			// Emit a warning if this is a known annotation that has
-			// been applied to an invalid object kind. Note that we
-			// only warn for known annotations because we want to
-			// allow users to add arbitrary orthogonal annotations
-			// to object that we inspect.
-			if annotationIsKnown(key) && !validAnnotationForKind(kind, key) {
-				// TODO(jpeach): this should be exposed
-				// to the user as a status condition.
-				om := obj.GetObjectMeta()
-				kc.WithField("name", om.GetName()).
-					WithField("namespace", om.GetNamespace()).
-					WithField("kind", kind).
-					WithField("version", "v1").
-					WithField("annotation", key).
-					Error("ignoring invalid or unsupported annotation")
-			}
-		}
-	}
-
-	switch obj := obj.(type) {
-	case *v1.Secret:
-		valid, err := isValidSecret(obj)
-		if !valid {
-			if err != nil {
-				om := obj.GetObjectMeta()
-				kc.WithField("name", om.GetName()).
-					WithField("namespace", om.GetNamespace()).
-					WithField("kind", "Secret").
-					WithField("version", "v1").
-					Error(err)
-			}
-			return false
-		}
-
-		m := toMeta(obj)
-		if kc.secrets == nil {
-			kc.secrets = make(map[Meta]*v1.Secret)
-		}
-		kc.secrets[m] = obj
-		return kc.secretTriggersRebuild(obj)
-	case *v1.Service:
-		m := toMeta(obj)
-		if kc.services == nil {
-			kc.services = make(map[Meta]*v1.Service)
-		}
-		kc.services[m] = obj
-		return kc.serviceTriggersRebuild(obj)
-	case *v1beta1.Ingress:
-		class := ingressClass(obj)
-		if class != "" && class != kc.ingressClass() {
-			return false
-		}
-		m := toMeta(obj)
-		if kc.ingresses == nil {
-			kc.ingresses = make(map[Meta]*v1beta1.Ingress)
-		}
-		kc.ingresses[m] = obj
-		return true
-	case *extensionsv1beta1.Ingress:
-		ingress := new(v1beta1.Ingress)
-		if err := transposeIngress(obj, ingress); err != nil {
-			om := obj.GetObjectMeta()
-			kc.WithField("name", om.GetName()).
-				WithField("namespace", om.GetNamespace()).
-				Error(err)
-			return false
-		}
-		return kc.Insert(ingress)
-	case *ingressroutev1.IngressRoute:
-		class := ingressClass(obj)
-		if class != "" && class != kc.ingressClass() {
-			return false
-		}
-		m := toMeta(obj)
-		if kc.ingressroutes == nil {
-			kc.ingressroutes = make(map[Meta]*ingressroutev1.IngressRoute)
-		}
-		kc.ingressroutes[m] = obj
-		return true
-	case *projectcontour.HTTPProxy:
-		class := ingressClass(obj)
-		if class != "" && class != kc.ingressClass() {
-			return false
-		}
-		m := toMeta(obj)
-		if kc.httpproxies == nil {
-			kc.httpproxies = make(map[Meta]*projectcontour.HTTPProxy)
-		}
-		kc.httpproxies[m] = obj
-		return true
-	case *ingressroutev1.TLSCertificateDelegation:
-		m := toMeta(obj)
-		if kc.irdelegations == nil {
-			kc.irdelegations = make(map[Meta]*ingressroutev1.TLSCertificateDelegation)
-		}
-		kc.irdelegations[m] = obj
-		return true
-	case *projectcontour.TLSCertificateDelegation:
-		m := toMeta(obj)
-		if kc.httpproxydelegations == nil {
-			kc.httpproxydelegations = make(map[Meta]*projectcontour.TLSCertificateDelegation)
-		}
-		kc.httpproxydelegations[m] = obj
-		return true
-
-	default:
-		// not an interesting object
-		kc.WithField("object", obj).Error("insert unknown object")
-		return false
-	}
-}
-
 // ingressClass returns the IngressClass
 // or DEFAULT_INGRESS_CLASS if not configured.
 func (kc *KubernetesCache) ingressClass() string {
 	return stringOrDefault(kc.IngressClass, DEFAULT_INGRESS_CLASS)
-}
-
-// Remove removes obj from the KubernetesCache.
-// Remove returns a boolean indicating if the cache changed after the remove operation.
-func (kc *KubernetesCache) Remove(obj interface{}) bool {
-	switch obj := obj.(type) {
-	default:
-		return kc.remove(obj)
-	case cache.DeletedFinalStateUnknown:
-		return kc.Remove(obj.Obj) // recurse into ourselves with the tombstoned value
-	}
-}
-
-func (kc *KubernetesCache) remove(obj interface{}) bool {
-	switch obj := obj.(type) {
-	case *v1.Secret:
-		m := toMeta(obj)
-		_, ok := kc.secrets[m]
-		delete(kc.secrets, m)
-		return ok
-	case *v1.Service:
-		m := toMeta(obj)
-		_, ok := kc.services[m]
-		delete(kc.services, m)
-		return ok
-	case *v1beta1.Ingress:
-		m := toMeta(obj)
-		_, ok := kc.ingresses[m]
-		delete(kc.ingresses, m)
-		return ok
-	case *extensionsv1beta1.Ingress:
-		m := toMeta(obj)
-		_, ok := kc.ingresses[m]
-		delete(kc.ingresses, m)
-		return ok
-	case *ingressroutev1.IngressRoute:
-		m := toMeta(obj)
-		_, ok := kc.ingressroutes[m]
-		delete(kc.ingressroutes, m)
-		return ok
-	case *projectcontour.HTTPProxy:
-		m := toMeta(obj)
-		_, ok := kc.httpproxies[m]
-		delete(kc.httpproxies, m)
-		return ok
-	case *ingressroutev1.TLSCertificateDelegation:
-		m := toMeta(obj)
-		_, ok := kc.irdelegations[m]
-		delete(kc.irdelegations, m)
-		return ok
-	case *projectcontour.TLSCertificateDelegation:
-		m := toMeta(obj)
-		_, ok := kc.httpproxydelegations[m]
-		delete(kc.httpproxydelegations, m)
-		return ok
-	default:
-		// not interesting
-		kc.WithField("object", obj).Error("remove unknown object")
-		return false
-	}
 }
 
 // serviceTriggersRebuild returns true if this service is referenced

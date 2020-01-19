@@ -484,7 +484,7 @@ func buildDAG(t *testing.T, objs ...interface{}) *dag.DAG {
 	}
 
 	for _, o := range objs {
-		builder.Source.Insert(o)
+		builder.CacheInsert(o)
 	}
 	return builder.Build()
 }

@@ -2491,7 +2491,7 @@ func TestDAGIngressRouteStatus(t *testing.T) {
 				},
 			}
 			for _, o := range tc.objs {
-				builder.Source.Insert(o)
+				builder.CacheInsert(o)
 			}
 			dag := builder.Build()
 			got := dag.Statuses()

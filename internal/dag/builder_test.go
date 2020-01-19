@@ -6026,7 +6026,7 @@ func TestDAGInsert(t *testing.T) {
 				},
 			}
 			for _, o := range tc.objs {
-				builder.Source.Insert(o)
+				builder.CacheInsert(o)
 			}
 			dag := builder.Build()
 
@@ -6335,7 +6335,7 @@ func TestDAGRootNamespaces(t *testing.T) {
 			}
 
 			for _, o := range tc.objs {
-				builder.Source.Insert(o)
+				builder.CacheInsert(o)
 			}
 			dag := builder.Build()
 

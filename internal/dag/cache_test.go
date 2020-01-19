@@ -901,13 +901,15 @@ func TestKubernetesCacheInsert(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			cache := KubernetesCache{
-				FieldLogger: testLogger(t),
+			builder := Builder{
+				Source: KubernetesCache{
+					FieldLogger: testLogger(t),	
+				},
 			}
 			for _, p := range tc.pre {
-				cache.Insert(p)
+				builder.CacheInsert(p)
 			}
-			got := cache.Insert(tc.obj)
+			got := builder.CacheInsert(tc.obj)
 			if tc.want != got {
 				t.Fatalf("Insert(%v): expected %v, got %v", tc.obj, tc.want, got)
 			}
@@ -916,23 +918,26 @@ func TestKubernetesCacheInsert(t *testing.T) {
 }
 
 func TestKubernetesCacheRemove(t *testing.T) {
-	cache := func(objs ...interface{}) *KubernetesCache {
-		cache := KubernetesCache{
-			FieldLogger: testLogger(t),
+
+	builder := func(objs ...interface{}) *Builder {
+		builder := Builder{
+			Source: KubernetesCache{
+				FieldLogger: testLogger(t),	
+			},
 		}
 		for _, o := range objs {
-			cache.Insert(o)
+			builder.CacheInsert(o)
 		}
-		return &cache
+		return &builder
 	}
 
 	tests := map[string]struct {
-		cache *KubernetesCache
+		builder *Builder
 		obj   interface{}
 		want  bool
 	}{
 		"remove secret": {
-			cache: cache(&v1.Secret{
+			builder: builder(&v1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "secret",
 					Namespace: "default",
@@ -953,7 +958,7 @@ func TestKubernetesCacheRemove(t *testing.T) {
 			want: true,
 		},
 		"remove service": {
-			cache: cache(&v1.Service{
+			builder: builder(&v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "service",
 					Namespace: "default",
@@ -968,7 +973,7 @@ func TestKubernetesCacheRemove(t *testing.T) {
 			want: true,
 		},
 		"remove ingress": {
-			cache: cache(&v1beta1.Ingress{
+			builder: builder(&v1beta1.Ingress{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "ingress",
 					Namespace: "default",
@@ -983,7 +988,7 @@ func TestKubernetesCacheRemove(t *testing.T) {
 			want: true,
 		},
 		"remove ingress incorrect ingressclass": {
-			cache: cache(&v1beta1.Ingress{
+			builder: builder(&v1beta1.Ingress{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "ingress",
 					Namespace: "default",
@@ -1004,7 +1009,7 @@ func TestKubernetesCacheRemove(t *testing.T) {
 			want: false,
 		},
 		"remove ingressroute": {
-			cache: cache(&ingressroutev1.IngressRoute{
+			builder: builder(&ingressroutev1.IngressRoute{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "ingressroute",
 					Namespace: "default",
@@ -1019,7 +1024,7 @@ func TestKubernetesCacheRemove(t *testing.T) {
 			want: true,
 		},
 		"remove ingressroute incorrect ingressclass": {
-			cache: cache(&ingressroutev1.IngressRoute{
+			builder: builder(&ingressroutev1.IngressRoute{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "ingressroute",
 					Namespace: "default",
@@ -1040,7 +1045,7 @@ func TestKubernetesCacheRemove(t *testing.T) {
 			want: false,
 		},
 		"remove httpproxy": {
-			cache: cache(&projcontour.HTTPProxy{
+			builder: builder(&projcontour.HTTPProxy{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "ingressroute",
 					Namespace: "default",
@@ -1055,7 +1060,7 @@ func TestKubernetesCacheRemove(t *testing.T) {
 			want: true,
 		},
 		"remove httpproxy incorrect ingressclass": {
-			cache: cache(&projcontour.HTTPProxy{
+			builder: builder(&projcontour.HTTPProxy{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "ingressroute",
 					Namespace: "default",
@@ -1076,7 +1081,7 @@ func TestKubernetesCacheRemove(t *testing.T) {
 			want: false,
 		},
 		"remove unknown": {
-			cache: cache("not an object"),
+			builder: builder("not an object"),
 			obj:   "not an object",
 			want:  false,
 		},
@@ -1084,7 +1089,7 @@ func TestKubernetesCacheRemove(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			got := tc.cache.Remove(tc.obj)
+			got := tc.builder.CacheRemove(tc.obj)
 			if tc.want != got {
 				t.Fatalf("Remove(%v): expected %v, got %v", tc.obj, tc.want, got)
 			}

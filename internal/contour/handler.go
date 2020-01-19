@@ -184,7 +184,7 @@ func (e *EventHandler) run(stop <-chan struct{}) error {
 func (e *EventHandler) onUpdate(op interface{}) bool {
 	switch op := op.(type) {
 	case opAdd:
-		return e.Builder.Source.Insert(op.obj)
+		return e.Builder.CacheInsert(op.obj)
 	case opUpdate:
 		if cmp.Equal(op.oldObj, op.newObj,
 			cmpopts.IgnoreFields(ingressroutev1.IngressRoute{}, "Status"),
@@ -193,11 +193,11 @@ func (e *EventHandler) onUpdate(op interface{}) bool {
 			e.WithField("op", "update").Debugf("%T skipping update, only status has changed", op.newObj)
 			return false
 		}
-		remove := e.Builder.Source.Remove(op.oldObj)
-		insert := e.Builder.Source.Insert(op.newObj)
+		remove := e.Builder.CacheRemove(op.oldObj)
+		insert := e.Builder.CacheInsert(op.newObj)
 		return remove || insert
 	case opDelete:
-		return e.Builder.Source.Remove(op.obj)
+		return e.Builder.CacheRemove(op.obj)
 	case bool:
 		return op
 	default:

@@ -22,6 +22,8 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/api/networking/v1beta1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/cache"
+	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 
 	"github.com/google/go-cmp/cmp"
 	ingressroutev1 "github.com/projectcontour/contour/apis/contour/v1beta1"
@@ -79,6 +81,179 @@ func (b *Builder) reset() {
 	b.securevirtualhosts = make(map[string]*SecureVirtualHost)
 
 	b.statuses = make(map[Meta]Status, len(b.statuses))
+}
+
+// CacheInsert inserts obj into the KubernetesCache.
+// CacheInsert returns true if the cache accepted the object, or false if the value
+// is not interesting to the cache. If an object with a matching type, name,
+// and namespace exists, it will be overwritten.
+func (b *Builder) CacheInsert(obj interface{}) bool {
+	if obj, ok := obj.(Object); ok {
+		kind := k8s.KindOf(obj)
+		for key := range obj.GetObjectMeta().GetAnnotations() {
+			// Emit a warning if this is a known annotation that has
+			// been applied to an invalid object kind. Note that we
+			// only warn for known annotations because we want to
+			// allow users to add arbitrary orthogonal annotations
+			// to object that we inspect.
+			if annotationIsKnown(key) && !validAnnotationForKind(kind, key) {
+				// TODO(jpeach): this should be exposed
+				// to the user as a status condition.
+				om := obj.GetObjectMeta()
+				b.Source.WithField("name", om.GetName()).
+					WithField("namespace", om.GetNamespace()).
+					WithField("kind", kind).
+					WithField("version", "v1").
+					WithField("annotation", key).
+					Error("ignoring invalid or unsupported annotation")
+			}
+		}
+	}
+
+	switch obj := obj.(type) {
+	case *v1.Secret:
+		valid, err := isValidSecret(obj)
+		if !valid {
+			if err != nil {
+				om := obj.GetObjectMeta()
+				b.Source.WithField("name", om.GetName()).
+					WithField("namespace", om.GetNamespace()).
+					WithField("kind", "Secret").
+					WithField("version", "v1").
+					Error(err)
+			}
+			return false
+		}
+
+		m := toMeta(obj)
+		if b.Source.secrets == nil {
+			b.Source.secrets = make(map[Meta]*v1.Secret)
+		}
+		b.Source.secrets[m] = obj
+		return b.Source.secretTriggersRebuild(obj)
+	case *v1.Service:
+		m := toMeta(obj)
+		if b.Source.services == nil {
+			b.Source.services = make(map[Meta]*v1.Service)
+		}
+		b.Source.services[m] = obj
+		return b.Source.serviceTriggersRebuild(obj)
+	case *v1beta1.Ingress:
+		class := ingressClass(obj)
+		if class != "" && class != b.Source.ingressClass() {
+			return false
+		}
+		m := toMeta(obj)
+		if b.Source.ingresses == nil {
+			b.Source.ingresses = make(map[Meta]*v1beta1.Ingress)
+		}
+		b.Source.ingresses[m] = obj
+		return true
+	case *extensionsv1beta1.Ingress:
+		ingress := new(v1beta1.Ingress)
+		if err := transposeIngress(obj, ingress); err != nil {
+			om := obj.GetObjectMeta()
+			b.Source.WithField("name", om.GetName()).
+				WithField("namespace", om.GetNamespace()).
+				Error(err)
+			return false
+		}
+		return b.CacheInsert(ingress)
+	case *ingressroutev1.IngressRoute:
+		class := ingressClass(obj)
+		if class != "" && class != b.Source.ingressClass() {
+			return false
+		}
+		m := toMeta(obj)
+		if b.Source.ingressroutes == nil {
+			b.Source.ingressroutes = make(map[Meta]*ingressroutev1.IngressRoute)
+		}
+		b.Source.ingressroutes[m] = obj
+		return true
+	case *projcontour.HTTPProxy:
+		class := ingressClass(obj)
+		if class != "" && class != b.Source.ingressClass() {
+			return false
+		}
+		m := toMeta(obj)
+		if b.Source.httpproxies == nil {
+			b.Source.httpproxies = make(map[Meta]*projcontour.HTTPProxy)
+		}
+		b.Source.httpproxies[m] = obj
+		return true
+	case *ingressroutev1.TLSCertificateDelegation:
+		m := toMeta(obj)
+		if b.Source.irdelegations == nil {
+			b.Source.irdelegations = make(map[Meta]*ingressroutev1.TLSCertificateDelegation)
+		}
+		b.Source.irdelegations[m] = obj
+		return true
+	case *projcontour.TLSCertificateDelegation:
+		m := toMeta(obj)
+		if b.Source.httpproxydelegations == nil {
+			b.Source.httpproxydelegations = make(map[Meta]*projcontour.TLSCertificateDelegation)
+		}
+		b.Source.httpproxydelegations[m] = obj
+		return true
+
+	default:
+		// not an interesting object
+		b.Source.WithField("object", obj).Error("insert unknown object")
+		return false
+	}
+}
+
+// CacheRemove removes obj from the KubernetesCache.
+// CacheRemove returns a boolean indicating if the cache changed after the remove operation.
+func (b *Builder) CacheRemove(obj interface{}) bool {
+	switch obj := obj.(type) {
+	case *v1.Secret:
+		m := toMeta(obj)
+		_, ok := b.Source.secrets[m]
+		delete(b.Source.secrets, m)
+		return ok
+	case *v1.Service:
+		m := toMeta(obj)
+		_, ok := b.Source.services[m]
+		delete(b.Source.services, m)
+		return ok
+	case *v1beta1.Ingress:
+		m := toMeta(obj)
+		_, ok := b.Source.ingresses[m]
+		delete(b.Source.ingresses, m)
+		return ok
+	case *extensionsv1beta1.Ingress:
+		m := toMeta(obj)
+		_, ok := b.Source.ingresses[m]
+		delete(b.Source.ingresses, m)
+		return ok
+	case *ingressroutev1.IngressRoute:
+		m := toMeta(obj)
+		_, ok := b.Source.ingressroutes[m]
+		delete(b.Source.ingressroutes, m)
+		return ok
+	case *projcontour.HTTPProxy:
+		m := toMeta(obj)
+		_, ok := b.Source.httpproxies[m]
+		delete(b.Source.httpproxies, m)
+		return ok
+	case *ingressroutev1.TLSCertificateDelegation:
+		m := toMeta(obj)
+		_, ok := b.Source.irdelegations[m]
+		delete(b.Source.irdelegations, m)
+		return ok
+	case *projcontour.TLSCertificateDelegation:
+		m := toMeta(obj)
+		_, ok := b.Source.httpproxydelegations[m]
+		delete(b.Source.httpproxydelegations, m)
+		return ok
+	case cache.DeletedFinalStateUnknown:
+		return b.CacheRemove(obj.Obj) // recurse into ourselves with the tombstoned value
+	default:
+		// not interesting
+		b.Source.WithField("object", obj).Error("remove unknown object")
+		return false
+	}
 }
 
 // lookupService returns a Service that matches the Meta and Port of the Kubernetes' Service.
