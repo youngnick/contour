@@ -141,64 +141,72 @@ func doServe(log logrus.FieldLogger, ctx *serveContext) error {
 
 	// step 3. build our mammoth Kubernetes event handler.
 	eh := &contour.EventHandler{
-		CacheHandler: &contour.CacheHandler{
-			ListenerVisitorConfig: contour.ListenerVisitorConfig{
-				UseProxyProto:          ctx.useProxyProto,
-				HTTPAddress:            ctx.httpAddr,
-				HTTPPort:               ctx.httpPort,
-				HTTPAccessLog:          ctx.httpAccessLog,
-				HTTPSAddress:           ctx.httpsAddr,
-				HTTPSPort:              ctx.httpsPort,
-				HTTPSAccessLog:         ctx.httpsAccessLog,
-				AccessLogType:          ctx.AccessLogFormat,
-				AccessLogFields:        ctx.AccessLogFields,
-				MinimumProtocolVersion: dag.MinProtoVersion(ctx.TLSConfig.MinimumProtocolVersion),
-				RequestTimeout:         ctx.RequestTimeout,
-			},
-			ListenerCache: contour.NewListenerCache(ctx.statsAddr, ctx.statsPort),
-			FieldLogger:   log.WithField("context", "CacheHandler"),
-		},
-		HoldoffDelay:    100 * time.Millisecond,
-		HoldoffMaxDelay: 500 * time.Millisecond,
 		StatusClient: &k8s.StatusWriter{
 			Client: clients.contour,
-		},
-		Builder: dag.Builder{
-			Source: dag.KubernetesCache{
-				RootNamespaces: ctx.ingressRouteRootNamespaces(),
-				IngressClass:   ctx.ingressClass,
-				FieldLogger:    log.WithField("context", "KubernetesCache"),
-			},
-			DisablePermitInsecure: ctx.DisablePermitInsecure,
 		},
 		FieldLogger: log.WithField("context", "contourEventHandler"),
 	}
 
+	cachechannel := make(chan *dag.DAG)
+
+	ch := &contour.CacheHandler{
+		ListenerVisitorConfig: contour.ListenerVisitorConfig{
+			UseProxyProto:          ctx.useProxyProto,
+			HTTPAddress:            ctx.httpAddr,
+			HTTPPort:               ctx.httpPort,
+			HTTPAccessLog:          ctx.httpAccessLog,
+			HTTPSAddress:           ctx.httpsAddr,
+			HTTPSPort:              ctx.httpsPort,
+			HTTPSAccessLog:         ctx.httpsAccessLog,
+			AccessLogType:          ctx.AccessLogFormat,
+			AccessLogFields:        ctx.AccessLogFields,
+			MinimumProtocolVersion: dag.MinProtoVersion(ctx.TLSConfig.MinimumProtocolVersion),
+			RequestTimeout:         ctx.RequestTimeout,
+		},
+		ListenerCache: contour.NewListenerCache(ctx.statsAddr, ctx.statsPort),
+		FieldLogger:   log.WithField("context", "CacheHandler"),
+		DAGupdate:     cachechannel,
+	}
+
+	b := &dag.Builder{
+		Source: dag.KubernetesCache{
+			RootNamespaces: ctx.ingressRouteRootNamespaces(),
+			IngressClass:   ctx.ingressClass,
+			FieldLogger:    log.WithField("context", "KubernetesCache"),
+		},
+		Holdoff: dag.HoldoffHandler{
+			HoldoffDelay:    100 * time.Millisecond,
+			HoldoffMaxDelay: 500 * time.Millisecond,
+			FieldLogger:     log.WithField("context", "Builder"),
+		},
+		DisablePermitInsecure: ctx.DisablePermitInsecure,
+		ToCache:               cachechannel,
+	}
 	// step 4. register our resource event handler with the k8s informers.
 	var informers []cache.SharedIndexInformer
-	informers = registerEventHandler(informers, coreInformers.Core().V1().Services().Informer(), eh)
-	informers = registerEventHandler(informers, contourInformers.Contour().V1beta1().IngressRoutes().Informer(), eh)
-	informers = registerEventHandler(informers, contourInformers.Contour().V1beta1().TLSCertificateDelegations().Informer(), eh)
-	informers = registerEventHandler(informers, contourInformers.Projectcontour().V1().HTTPProxies().Informer(), eh)
-	informers = registerEventHandler(informers, contourInformers.Projectcontour().V1().TLSCertificateDelegations().Informer(), eh)
+	informers = registerEventHandler(informers, coreInformers.Core().V1().Services().Informer(), b)
+	informers = registerEventHandler(informers, contourInformers.Contour().V1beta1().IngressRoutes().Informer(), b)
+	informers = registerEventHandler(informers, contourInformers.Contour().V1beta1().TLSCertificateDelegations().Informer(), b)
+	informers = registerEventHandler(informers, contourInformers.Projectcontour().V1().HTTPProxies().Informer(), b)
+	informers = registerEventHandler(informers, contourInformers.Projectcontour().V1().TLSCertificateDelegations().Informer(), b)
 
 	// After K8s 1.13 the API server will automatically translate extensions/v1beta1.Ingress objects
 	// to networking/v1beta1.Ingress objects so we should only listen for one type or the other.
 	// The default behavior is to listen for networking/v1beta1.Ingress objects and let the API server
 	// transparently upgrade the extensions version for us.
 	if ctx.UseExtensionsV1beta1Ingress {
-		informers = registerEventHandler(informers, coreInformers.Extensions().V1beta1().Ingresses().Informer(), eh)
+		informers = registerEventHandler(informers, coreInformers.Extensions().V1beta1().Ingresses().Informer(), b)
 	} else {
-		informers = registerEventHandler(informers, coreInformers.Networking().V1beta1().Ingresses().Informer(), eh)
+		informers = registerEventHandler(informers, coreInformers.Networking().V1beta1().Ingresses().Informer(), b)
 	}
 
 	// Add informers for each root-ingressroute namespaces
 	for _, inf := range namespacedInformers {
-		informers = registerEventHandler(informers, inf.Core().V1().Secrets().Informer(), eh)
+		informers = registerEventHandler(informers, inf.Core().V1().Secrets().Informer(), b)
 	}
 	// If root-ingressroutes are not defined, then add the informer for all namespaces
 	if len(namespacedInformers) == 0 {
-		informers = registerEventHandler(informers, coreInformers.Core().V1().Secrets().Informer(), eh)
+		informers = registerEventHandler(informers, coreInformers.Core().V1().Secrets().Informer(), b)
 	}
 
 	// step 5. endpoints updates are handled directly by the EndpointsTranslator
@@ -208,6 +216,11 @@ func doServe(log logrus.FieldLogger, ctx *serveContext) error {
 	}
 
 	informers = registerEventHandler(informers, coreInformers.Core().V1().Endpoints().Informer(), et)
+
+	// step 8. setup prometheus registry and register base metrics.
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	registry.MustRegister(prometheus.NewGoCollector())
 
 	// step 6. setup workgroup runner and register informers.
 	var g workgroup.Group
@@ -220,10 +233,8 @@ func doServe(log logrus.FieldLogger, ctx *serveContext) error {
 	// step 7. register our event handler with the workgroup
 	g.Add(eh.Start())
 
-	// step 8. setup prometheus registry and register base metrics.
-	registry := prometheus.NewRegistry()
-	registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
-	registry.MustRegister(prometheus.NewGoCollector())
+	g.Add(ch.WorkgroupStart())
+	g.Add(b.WorkgroupStart())
 
 	// step 9. create metrics service and register with workgroup.
 	metricsvc := metrics.Service{
@@ -244,7 +255,7 @@ func doServe(log logrus.FieldLogger, ctx *serveContext) error {
 			Port:        ctx.debugPort,
 			FieldLogger: log.WithField("context", "debugsvc"),
 		},
-		Builder: &eh.Builder,
+		Builder: b,
 	}
 	g.Add(debugsvc.Start)
 
@@ -308,7 +319,7 @@ func doServe(log logrus.FieldLogger, ctx *serveContext) error {
 	// and resource event handler.
 	metrics := metrics.NewMetrics(registry)
 	eh.Metrics = metrics
-	eh.CacheHandler.Metrics = metrics
+	ch.Metrics = metrics
 
 	// step 13. create grpc handler and register with workgroup.
 	g.Add(func(stop <-chan struct{}) error {
@@ -326,11 +337,11 @@ func doServe(log logrus.FieldLogger, ctx *serveContext) error {
 		log.Printf("informer caches synced")
 
 		resources := map[string]cgrpc.Resource{
-			eh.CacheHandler.ClusterCache.TypeURL():  &eh.CacheHandler.ClusterCache,
-			eh.CacheHandler.RouteCache.TypeURL():    &eh.CacheHandler.RouteCache,
-			eh.CacheHandler.ListenerCache.TypeURL(): &eh.CacheHandler.ListenerCache,
-			eh.CacheHandler.SecretCache.TypeURL():   &eh.CacheHandler.SecretCache,
-			et.TypeURL():                            et,
+			ch.ClusterCache.TypeURL():  &ch.ClusterCache,
+			ch.RouteCache.TypeURL():    &ch.RouteCache,
+			ch.ListenerCache.TypeURL(): &ch.ListenerCache,
+			ch.SecretCache.TypeURL():   &ch.SecretCache,
+			et.TypeURL():               et,
 		}
 		opts := ctx.grpcOptions()
 		s := cgrpc.NewAPI(log, resources, registry, opts...)

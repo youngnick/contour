@@ -18,17 +18,21 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
+	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	"k8s.io/api/networking/v1beta1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/cache"
-	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	ingressroutev1 "github.com/projectcontour/contour/apis/contour/v1beta1"
 	projcontour "github.com/projectcontour/contour/apis/projectcontour/v1"
 	"github.com/projectcontour/contour/internal/k8s"
+	"github.com/sirupsen/logrus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Builder builds a DAG.
@@ -51,6 +55,10 @@ type Builder struct {
 	orphaned map[Meta]bool
 
 	StatusWriter
+
+	Holdoff HoldoffHandler
+
+	ToCache chan *DAG
 }
 
 // Build builds a new DAG.
@@ -84,8 +92,8 @@ func (b *Builder) reset() {
 }
 
 // CacheInsert inserts obj into the KubernetesCache.
-// CacheInsert returns true if the cache accepted the object, or false if the value
-// is not interesting to the cache. If an object with a matching type, name,
+// CacheInsert returns true if the Cache accepted the object, or false if the value
+// is not interesting to the Cache. If an object with a matching type, name,
 // and namespace exists, it will be overwritten.
 func (b *Builder) CacheInsert(obj interface{}) bool {
 	if obj, ok := obj.(Object); ok {
@@ -204,7 +212,7 @@ func (b *Builder) CacheInsert(obj interface{}) bool {
 }
 
 // CacheRemove removes obj from the KubernetesCache.
-// CacheRemove returns a boolean indicating if the cache changed after the remove operation.
+// CacheRemove returns a boolean indicating if the Cache changed after the remove operation.
 func (b *Builder) CacheRemove(obj interface{}) bool {
 	switch obj := obj.(type) {
 	case *v1.Secret:
@@ -253,6 +261,196 @@ func (b *Builder) CacheRemove(obj interface{}) bool {
 		// not interesting
 		b.Source.WithField("object", obj).Error("remove unknown object")
 		return false
+	}
+}
+
+// HoldoffHandler holds all the details for handling the Builder Holdoff.
+type HoldoffHandler struct {
+	logrus.FieldLogger
+
+	HoldoffDelay, HoldoffMaxDelay time.Duration
+
+	update chan interface{}
+
+	// last holds the last time CacheHandler.OnUpdate was called.
+	last time.Time
+
+	// Sequence is a channel that receives a incrementing sequence number
+	// for each update processed. The updates may be processed immediately, or
+	// delayed by a Holdoff timer. In each case a non blocking send to Sequence
+	// will be made once CacheHandler.OnUpdate has been called.
+	Sequence chan int
+
+	// seq is the sequence counter of the number of times
+	// an event has been received.
+	seq int
+}
+
+// WorkgroupStart initializes the EventHandler and returns a function suitable
+// for registration with a workgroup.Group.
+func (b *Builder) WorkgroupStart() func(<-chan struct{}) error {
+	b.Holdoff.update = make(chan interface{})
+	b.Holdoff.last = time.Now()
+	return b.run
+}
+
+// run is the main event handling loop.
+func (b *Builder) run(stop <-chan struct{}) error {
+	b.Holdoff.Info("started")
+	defer b.Holdoff.Info("stopped")
+
+	var (
+		// outstanding counts the number of events received but not
+		// yet send to the CacheHandler.
+		outstanding int
+
+		// timer holds the timer which will expire after b.Holdoff.HoldoffDelay
+		timer *time.Timer
+
+		// pending is a reference to the current timer's channel.
+		pending <-chan time.Time
+	)
+
+	reset := func() (v int) {
+		v, outstanding = outstanding, 0
+		return
+	}
+
+	for {
+		// In the main loop one of four things can happen.
+		// 1. We're waiting for an event on op, stop, or pending, noting that
+		//    pending may be nil if there are no pending events.
+		// 2. We're processing an event.
+		// 3. The Holdoff timer from a previous event has fired and we're
+		//    building a new DAG and sending to the CacheHandler.
+		// 4. We're stopping.
+		//
+		// Only one of these things can happen at a time.
+		select {
+		case op := <-b.Holdoff.update:
+			if b.onUpdate(op) {
+				outstanding++
+				// If there is already a timer running, stop it and clear pending.
+				if timer != nil {
+					timer.Stop()
+
+					// nil out pending in the case that the timer had already expired.
+					// This effectively clears the notification.
+					pending = nil
+				}
+
+				since := time.Since(b.Holdoff.last)
+				if since > b.Holdoff.HoldoffMaxDelay {
+					// the Holdoff delay has been exceeded so we must update immediately.
+					b.Holdoff.WithField("last_update", since).WithField("outstanding", reset()).Info("forcing update")
+					b.updateDAG() // rebuild dag and send to CacheHandler.
+					b.Holdoff.incSequence()
+					continue
+				}
+
+				// If we get here then there is still time remaining before max Holdoff so
+				// start a new timer for the Holdoff delay.
+				timer = time.NewTimer(b.Holdoff.HoldoffDelay)
+				pending = timer.C
+			} else {
+				// notify any watchers that we received the event but chose
+				// not to process it.
+				b.Holdoff.incSequence()
+			}
+		case <-pending:
+			b.Holdoff.WithField("last_update", time.Since(b.Holdoff.last)).WithField("outstanding", reset()).Info("performing delayed update")
+			b.updateDAG()
+			b.Holdoff.incSequence()
+		case <-stop:
+			// shutdown
+			return nil
+		}
+	}
+}
+
+type opAdd struct {
+	obj interface{}
+}
+
+type opUpdate struct {
+	oldObj, newObj interface{}
+}
+
+type opDelete struct {
+	obj interface{}
+}
+
+func (b *Builder) OnAdd(obj interface{}) {
+	b.Holdoff.update <- opAdd{obj: obj}
+}
+
+func (b *Builder) OnUpdate(oldObj, newObj interface{}) {
+	b.Holdoff.update <- opUpdate{oldObj: oldObj, newObj: newObj}
+}
+
+func (b *Builder) OnDelete(obj interface{}) {
+	b.Holdoff.update <- opDelete{obj: obj}
+}
+
+// UpdateNow enqueues a DAG update subject to the Holdoff timer.
+func (b *Builder) UpdateNow() {
+	b.Holdoff.update <- true
+}
+
+// onUpdate processes the event received. onUpdate returns
+// true if the event changed the cache in a way that requires
+// notifying the CacheHandler.
+func (b *Builder) onUpdate(op interface{}) bool {
+	switch op := op.(type) {
+	case opAdd:
+		return b.CacheInsert(op.obj)
+	case opUpdate:
+		if cmp.Equal(op.oldObj, op.newObj,
+			cmpopts.IgnoreFields(ingressroutev1.IngressRoute{}, "Status"),
+			cmpopts.IgnoreFields(projcontour.HTTPProxy{}, "Status"),
+			cmpopts.IgnoreFields(metav1.ObjectMeta{}, "ResourceVersion")) {
+			b.Holdoff.WithField("op", "update").Debugf("%T skipping update, only status has changed", op.newObj)
+			return false
+		}
+		remove := b.CacheRemove(op.oldObj)
+		insert := b.CacheInsert(op.newObj)
+		return remove || insert
+	case opDelete:
+		return b.CacheRemove(op.obj)
+	case bool:
+		return op
+	default:
+		return false
+	}
+}
+
+func (b *Builder) updateDAG() {
+	b.ToCache <- b.Build()
+
+	// select {
+	// case <-e.IsLeader:
+	// 	// we're the leader, update status and metrics
+	// 	statuses := dag.Statuses()
+	// 	e.setStatus(statuses)
+
+	// 	metrics, proxymetrics := calculateRouteMetric(statuses)
+	// 	e.Metrics.SetIngressRouteMetric(metrics)
+	// 	e.Metrics.SetHTTPProxyMetric(proxymetrics)
+	// default:
+	// 	e.Debug("skipping status update: not the leader")
+	// }
+
+	b.Holdoff.last = time.Now()
+}
+
+// incSequence bumps the sequence counter and sends it to e.Sequence.
+func (h *HoldoffHandler) incSequence() {
+	h.seq++
+	select {
+	case h.Sequence <- h.seq:
+		// This is a non blocking send so if this field is nil, or the
+		// receiver is not ready this send does not block incSequence's caller.
+	default:
 	}
 }
 

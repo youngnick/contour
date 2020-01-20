@@ -903,7 +903,7 @@ func TestKubernetesCacheInsert(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			builder := Builder{
 				Source: KubernetesCache{
-					FieldLogger: testLogger(t),	
+					FieldLogger: testLogger(t),
 				},
 			}
 			for _, p := range tc.pre {
@@ -922,7 +922,7 @@ func TestKubernetesCacheRemove(t *testing.T) {
 	builder := func(objs ...interface{}) *Builder {
 		builder := Builder{
 			Source: KubernetesCache{
-				FieldLogger: testLogger(t),	
+				FieldLogger: testLogger(t),
 			},
 		}
 		for _, o := range objs {
@@ -933,8 +933,8 @@ func TestKubernetesCacheRemove(t *testing.T) {
 
 	tests := map[string]struct {
 		builder *Builder
-		obj   interface{}
-		want  bool
+		obj     interface{}
+		want    bool
 	}{
 		"remove secret": {
 			builder: builder(&v1.Secret{
@@ -1082,8 +1082,8 @@ func TestKubernetesCacheRemove(t *testing.T) {
 		},
 		"remove unknown": {
 			builder: builder("not an object"),
-			obj:   "not an object",
-			want:  false,
+			obj:     "not an object",
+			want:    false,
 		},
 	}
 

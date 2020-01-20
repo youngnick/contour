@@ -21,7 +21,6 @@ import (
 
 	"github.com/projectcontour/contour/internal/dag"
 	"github.com/projectcontour/contour/internal/metrics"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 )
 
@@ -36,11 +35,13 @@ type CacheHandler struct {
 	*metrics.Metrics
 
 	logrus.FieldLogger
+
+	DAGupdate chan *dag.DAG
 }
 
 func (ch *CacheHandler) OnChange(dag *dag.DAG) {
-	timer := prometheus.NewTimer(ch.CacheHandlerOnUpdateSummary)
-	defer timer.ObserveDuration()
+	// timer := prometheus.NewTimer(ch.CacheHandlerOnUpdateSummary)
+	// defer timer.ObserveDuration()
 
 	ch.updateSecrets(dag)
 	ch.updateListeners(dag)
@@ -48,6 +49,27 @@ func (ch *CacheHandler) OnChange(dag *dag.DAG) {
 	ch.updateClusters(dag)
 
 	ch.SetDAGLastRebuilt(time.Now())
+}
+
+func (ch *CacheHandler) WorkgroupStart() func(<-chan struct{}) error {
+
+	return func(stop <-chan struct{}) error {
+		ch.Info("started")
+		defer ch.Info("stopped")
+
+		for {
+			select {
+			case dag := <-ch.DAGupdate:
+				// got a dag update
+				ch.OnChange(dag)
+			case <-stop:
+				// shutdown
+				return nil
+			}
+		}
+
+	}
+
 }
 
 func (ch *CacheHandler) updateSecrets(root dag.Visitable) {
