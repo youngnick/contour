@@ -24,10 +24,17 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	contourinformers "github.com/projectcontour/contour/apis/generated/informers/externalversions"
+	projcontour "github.com/projectcontour/contour/apis/projectcontour/v1"
 	"github.com/projectcontour/contour/internal/contour"
+	"github.com/projectcontour/contour/internal/controllers"
 	"github.com/projectcontour/contour/internal/dag"
 	"github.com/projectcontour/contour/internal/debug"
 	cgrpc "github.com/projectcontour/contour/internal/grpc"
@@ -35,7 +42,6 @@ import (
 	"github.com/projectcontour/contour/internal/k8s"
 	"github.com/projectcontour/contour/internal/metrics"
 	"github.com/projectcontour/contour/internal/workgroup"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"gopkg.in/yaml.v2"
@@ -148,6 +154,7 @@ func doServe(log logrus.FieldLogger, ctx *serveContext) error {
 	}
 
 	cachechannel := make(chan *dag.DAG)
+	controllerchannel := make(chan interface{})
 
 	ch := &contour.CacheHandler{
 		ListenerVisitorConfig: contour.ListenerVisitorConfig{
@@ -181,13 +188,15 @@ func doServe(log logrus.FieldLogger, ctx *serveContext) error {
 		},
 		DisablePermitInsecure: ctx.DisablePermitInsecure,
 		ToCache:               cachechannel,
+		FromController:        controllerchannel,
 	}
+
 	// step 4. register our resource event handler with the k8s informers.
 	var informers []cache.SharedIndexInformer
 	informers = registerEventHandler(informers, coreInformers.Core().V1().Services().Informer(), b)
 	informers = registerEventHandler(informers, contourInformers.Contour().V1beta1().IngressRoutes().Informer(), b)
 	informers = registerEventHandler(informers, contourInformers.Contour().V1beta1().TLSCertificateDelegations().Informer(), b)
-	informers = registerEventHandler(informers, contourInformers.Projectcontour().V1().HTTPProxies().Informer(), b)
+	// informers = registerEventHandler(informers, contourInformers.Projectcontour().V1().HTTPProxies().Informer(), b)
 	informers = registerEventHandler(informers, contourInformers.Projectcontour().V1().TLSCertificateDelegations().Informer(), b)
 
 	// After K8s 1.13 the API server will automatically translate extensions/v1beta1.Ingress objects
@@ -218,9 +227,32 @@ func doServe(log logrus.FieldLogger, ctx *serveContext) error {
 	informers = registerEventHandler(informers, coreInformers.Core().V1().Endpoints().Informer(), et)
 
 	// step 8. setup prometheus registry and register base metrics.
-	registry := prometheus.NewRegistry()
-	registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
-	registry.MustRegister(prometheus.NewGoCollector())
+	registry := ctrlmetrics.Registry
+
+	// step ??. Setup controller-runtime manager
+
+	ctrl.SetLogger(zap.Logger(true))
+
+	scheme := runtime.NewScheme()
+	setupLog := ctrl.Log.WithName("setup")
+	clientgoscheme.AddToScheme(scheme)
+	projcontour.AddToScheme(scheme)
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Scheme:             scheme,
+		MetricsBindAddress: fmt.Sprintf("%s:%d", ctx.metricsAddr, ctx.metricsPort),
+		// LeaderElection:     enableLeaderElection,
+		Port: 9443,
+	})
+
+	if err = (&controllers.HTTPProxyReconciler{
+		Client:       mgr.GetClient(),
+		Log:          ctrl.Log.WithName("controllers").WithName("HTTPProxy"),
+		ToController: controllerchannel,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "HTTPProxy")
+		os.Exit(1)
+	}
 
 	// step 6. setup workgroup runner and register informers.
 	var g workgroup.Group
@@ -230,23 +262,12 @@ func doServe(log logrus.FieldLogger, ctx *serveContext) error {
 		g.Add(startInformer(inf, log.WithField("context", "corenamespacedinformers")))
 	}
 
+	g.Add(mgr.Start)
 	// step 7. register our event handler with the workgroup
 	g.Add(eh.Start())
 
 	g.Add(ch.WorkgroupStart())
 	g.Add(b.WorkgroupStart())
-
-	// step 9. create metrics service and register with workgroup.
-	metricsvc := metrics.Service{
-		Service: httpsvc.Service{
-			Addr:        ctx.metricsAddr,
-			Port:        ctx.metricsPort,
-			FieldLogger: log.WithField("context", "metricsvc"),
-		},
-		Client:   clients.core,
-		Registry: registry,
-	}
-	g.Add(metricsvc.Start)
 
 	// step 10. create debug service and register with workgroup.
 	debugsvc := debug.Service{

@@ -59,6 +59,7 @@ type Builder struct {
 	Holdoff HoldoffHandler
 
 	ToCache chan *DAG
+	FromController chan interface{}
 }
 
 // Build builds a new DAG.
@@ -179,6 +180,7 @@ func (b *Builder) CacheInsert(obj interface{}) bool {
 		b.Source.ingressroutes[m] = obj
 		return true
 	case *projcontour.HTTPProxy:
+		b.Holdoff.Infof("%s/%s httpproxy", obj.ObjectMeta.Namespace, obj.ObjectMeta.Name)
 		class := ingressClass(obj)
 		if class != "" && class != b.Source.ingressClass() {
 			return false
@@ -241,6 +243,7 @@ func (b *Builder) CacheRemove(obj interface{}) bool {
 		delete(b.Source.ingressroutes, m)
 		return ok
 	case *projcontour.HTTPProxy:
+		b.Holdoff.WithField("object", obj)
 		m := toMeta(obj)
 		_, ok := b.Source.httpproxies[m]
 		delete(b.Source.httpproxies, m)
@@ -270,7 +273,13 @@ type HoldoffHandler struct {
 
 	HoldoffDelay, HoldoffMaxDelay time.Duration
 
+	// update is a channel used to receive updated objects
+	// from Informers to the builder
 	update chan interface{}
+
+	// controllerupdate is used to receive updated objects
+	// from controller-utils controllers
+	controllerupdate chan interface{}
 
 	// last holds the last time CacheHandler.OnUpdate was called.
 	last time.Time
@@ -357,6 +366,37 @@ func (b *Builder) run(stop <-chan struct{}) error {
 				// not to process it.
 				b.Holdoff.incSequence()
 			}
+		case op := <-b.FromController:
+			if b.onUpdate(op) {
+				outstanding++
+				// If there is already a timer running, stop it and clear pending.
+				if timer != nil {
+					timer.Stop()
+
+					// nil out pending in the case that the timer had already expired.
+					// This effectively clears the notification.
+					pending = nil
+				}
+
+				since := time.Since(b.Holdoff.last)
+				if since > b.Holdoff.HoldoffMaxDelay {
+					// the Holdoff delay has been exceeded so we must update immediately.
+					b.Holdoff.WithField("last_update", since).WithField("outstanding", reset()).Info("forcing update")
+					b.updateDAG() // rebuild dag and send to CacheHandler.
+					b.Holdoff.incSequence()
+					continue
+				}
+
+				// If we get here then there is still time remaining before max Holdoff so
+				// start a new timer for the Holdoff delay.
+				timer = time.NewTimer(b.Holdoff.HoldoffDelay)
+				pending = timer.C
+			} else {
+				// notify any watchers that we received the event but chose
+				// not to process it.
+				b.Holdoff.incSequence()
+			}
+
 		case <-pending:
 			b.Holdoff.WithField("last_update", time.Since(b.Holdoff.last)).WithField("outstanding", reset()).Info("performing delayed update")
 			b.updateDAG()
@@ -376,8 +416,15 @@ type opUpdate struct {
 	oldObj, newObj interface{}
 }
 
+type OpUpsert struct {
+	Obj interface{}
+}
+
 type opDelete struct {
 	obj interface{}
+}
+type OpDelete struct {
+	Obj interface{}
 }
 
 func (b *Builder) OnAdd(obj interface{}) {
@@ -397,7 +444,7 @@ func (b *Builder) UpdateNow() {
 	b.Holdoff.update <- true
 }
 
-// onUpdate processes the event received. onUpdate returns
+// onUpdate processes the event received from an Informer. onUpdate returns
 // true if the event changed the cache in a way that requires
 // notifying the CacheHandler.
 func (b *Builder) onUpdate(op interface{}) bool {
@@ -417,6 +464,14 @@ func (b *Builder) onUpdate(op interface{}) bool {
 		return remove || insert
 	case opDelete:
 		return b.CacheRemove(op.obj)
+	case OpUpsert:
+		b.Holdoff.Info("Got an Upsert operation")
+		remove := b.CacheRemove(op.Obj)
+		insert := b.CacheInsert(op.Obj)
+		return remove || insert		
+	case OpDelete:
+		b.Holdoff.Info("Got an Delete operation")
+		return b.CacheRemove(op.Obj)
 	case bool:
 		return op
 	default:

@@ -72,6 +72,9 @@ func (ch *CacheHandler) WorkgroupStart() func(<-chan struct{}) error {
 
 }
 
+// TODO: CacheHandler will need some public reading methods, I think.
+// They must be read-only though.
+
 func (ch *CacheHandler) updateSecrets(root dag.Visitable) {
 	secrets := visitSecrets(root)
 	ch.SecretCache.Update(secrets)
