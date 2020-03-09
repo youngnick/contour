@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	v2 "github.com/envoyproxy/go-control-plane/envoy/api/v2"
+	// "github.com/go-test/deep"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/golang/protobuf/ptypes/any"
@@ -36,19 +37,30 @@ func Equal(t *testing.T, want, got interface{}) {
 
 // Equal will call t.Fatal if want and got are not equal.
 func (a Assert) Equal(want, got interface{}) {
+	// deep.CompareUnexportedFields = true
 	a.t.Helper()
 	opts := []cmp.Option{
 		cmpopts.IgnoreFields(v2.DiscoveryResponse{}, "VersionInfo", "Nonce"),
 		cmpopts.AcyclicTransformer("UnmarshalAny", unmarshalAny),
 		// errors to be equal only if both are nil or both are non-nil.
 		cmp.Comparer(func(x, y error) bool {
+			if (x != nil) && (y != nil) {
+				return x.Error() == y.Error()
+			}
+
 			return (x == nil) == (y == nil)
 		}),
 	}
+	// diff := deep.Equal(want, got)
+	// if len(diff) > 0 {
+	// 	a.t.Fatal(diff)
+	// }
+
 	diff := cmp.Diff(want, got, opts...)
 	if diff != "" {
 		a.t.Fatal(diff)
 	}
+
 }
 
 func unmarshalAny(a *any.Any) proto.Message {

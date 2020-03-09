@@ -367,9 +367,10 @@ func TestConvertUnstructured(t *testing.T) {
 	})
 
 	run(t, "notunstructured", testcase{
-		obj:       proxy1,
-		want:      nil,
-		wantError: errors.New("unable to convert unstructured object to projectcontour.io/v1, Kind=HTTPProxy: cannot convert int to string"),
+		obj:  proxy1,
+		want: nil,
+
+		wantError: errors.New("unsupported object type: *v1.HTTPProxy"),
 	})
 
 	run(t, "gatewayclass", testcase{
