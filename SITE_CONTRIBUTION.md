@@ -23,7 +23,7 @@ site
 │       └── Metropolis
 ├── _data # Custom data files
 ├── docs # Versioned product documentation
-│   ├── master
+│   ├── main
 │   └── v1.0.0
 ├── _guides # Unversioned product usage guides
 ├── img
@@ -159,8 +159,8 @@ Please ensure that your local version of bundler matches the version specified i
 [1]: https://jekyllrb.com/docs/
 [2]: https://help.shopify.com/en/themes/liquid/basics
 [3]: https://sourceforge.net/p/lookup/wiki/markdown_syntax/#md_ex_reflinks
-[4]: https://github.com/jekyll/github-metadata/blob/master/docs/site.github.md
-[5]: https://guides.github.com/features/mastering-markdown/
+[4]: https://github.com/jekyll/github-metadata/blob/main/docs/site.github.md
+[5]: https://guides.github.com/features/maining-markdown/
 [6]: https://jekyllrb.com
 [7]: /CONTRIBUTING.md#contribution-workflow
 [8]: /CONTRIBUTING.md

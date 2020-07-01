@@ -104,4 +104,4 @@ When Contour learns of changes in API server documents, it would ping the manage
 
 We did not explore this option because the strong preference of the Envoy team is to pursue the gRPC API mechanism.
 
-[0]: https://github.com/envoyproxy/data-plane-api/blob/master/XDS_PROTOCOL.md
+[0]: https://github.com/envoyproxy/data-plane-api/blob/main/XDS_PROTOCOL.md

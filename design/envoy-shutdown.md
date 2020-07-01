@@ -165,7 +165,7 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.namespace
-        image: docker.io/projectcontour/contour:master
+        image: docker.io/projectcontour/contour:main
         imagePullPolicy: Always
         name: envoy-initconfig
         resources: {}

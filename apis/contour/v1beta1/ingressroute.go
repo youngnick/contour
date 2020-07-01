@@ -120,7 +120,7 @@ type Service struct {
 	// HealthCheck defines optional healthchecks on the upstream service
 	// +optional
 	HealthCheck *HealthCheck `json:"healthCheck,omitempty"`
-	// LB Algorithm to apply (see https://github.com/projectcontour/contour/blob/master/design/ingressroute-design.md#load-balancing)
+	// LB Algorithm to apply (see https://github.com/projectcontour/contour/blob/main/design/ingressroute-design.md#load-balancing)
 	// +optional
 	Strategy string `json:"strategy,omitempty"`
 	// UpstreamValidation defines how to verify the backend service's certificate

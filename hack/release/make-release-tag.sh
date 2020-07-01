@@ -41,10 +41,10 @@ run::sed() {
 # NOTE(jpeach): this will go away or change once we move to kustomize
 # since at that point the versioned image name will appear exactly once.
 for example in examples/contour/03-envoy.yaml examples/contour/03-contour.yaml ; do
-    # The version might be master or OLDVERS depending on whether we are
-    # tagging from the release branch or from master.
+    # The version might be main or OLDVERS depending on whether we are
+    # tagging from the release branch or from main.
     run::sed \
-        "-es|docker.io/projectcontour/contour:master|$IMG|" \
+        "-es|docker.io/projectcontour/contour:main|$IMG|" \
         "-es|docker.io/projectcontour/contour:$OLDVERS|$IMG|" \
         "$example"
 done

@@ -46,9 +46,9 @@ defaults:
     layout: "default"
     toc: "h2, h3" # Default TOC levels, see _includes/footer.html.
 - scope:
-    path: docs/master
+    path: docs/main
   values:
-    version: master
+    version: main
     layout: "docs"
 - scope:
     path: docs/v1.2.1
@@ -118,7 +118,7 @@ collections:
 versioning: true
 latest: v1.6.0
 versions:
-- master
+- main
 - v1.6.0
 - v1.5.1
 - v1.5.0

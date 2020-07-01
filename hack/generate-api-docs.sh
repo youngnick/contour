@@ -39,4 +39,4 @@ ln -s $REPO ${GOPATH}/src/github.com/projectcontour/contour
 
 gendoc::exec \
     -api-dir github.com/projectcontour/contour/apis/projectcontour \
-    -out-file $REPO/site/docs/master/api-reference.html
+    -out-file $REPO/site/docs/main/api-reference.html
