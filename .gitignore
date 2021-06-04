@@ -3,6 +3,10 @@
 vendor/
 .vs/
 .idea/
+
+# local development script storage
+test/scripts/devcache/
+
 # TODO(youngnick): Move these out of the repo root.
 localenvoyconfig.yaml
 securelocalenvoyconfig.yaml

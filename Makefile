@@ -359,6 +359,23 @@ check-ingress-conformance: | install-contour-working run-ingress-conformance cle
 run-ingress-conformance:
 	./test/scripts/run-ingress-conformance.sh
 
+.PHONY: setup-local
+setup-local: | install-contour-working
+	DOCKERIP=${DOCKERIP} ./test/scripts/setup-local-dev.sh
+
+.PHONY: setup-local-release
+setup-local-release: | install-contour-release
+	DOCKERIP=${DOCKERIP} ./test/scripts/setup-local-dev.sh
+
+.PHONY: run-local
+run-local: | install
+	contour serve --xds-address=0.0.0.0 \
+		--debug \
+		--contour-cafile=./test/scripts/devcache/ca.crt \
+		--contour-cert-file=./test/scripts/devcache/tls.crt \
+		--contour-key-file=./test/scripts/devcache/tls.key
+
+
 help: ## Display this help
 	@echo Contour high performance Ingress controller for Kubernetes
 	@echo
